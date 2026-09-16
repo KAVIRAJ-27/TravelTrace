@@ -4,17 +4,22 @@ import com.travelhistory.app.data.db.LocationRecord
 import com.travelhistory.app.data.db.TripRecord
 import com.travelhistory.app.data.map.offline.OfflineMapRegion
 import com.travelhistory.app.data.map.offline.OfflineRegionStatus
+import com.travelhistory.app.data.map.offline.OfflineStorageDiagnostics
 import com.travelhistory.app.data.map.offline.PREDEFINED_OFFLINE_REGIONS
+import com.travelhistory.app.data.map.offline.RegionDiagnosticInfo
+import com.travelhistory.app.data.map.offline.formatStorageBytes
 import com.travelhistory.app.ui.map.MapUiState
 import com.travelhistory.app.ui.map.MapViewModel
 import com.travelhistory.app.ui.map.offline.OfflineMapsUiState
 import com.travelhistory.app.ui.map.provider.MapProviderType
 import com.travelhistory.app.ui.map.provider.MapSelectionMode
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class OfflineMapAndDualSystemTest {
 
@@ -115,27 +120,122 @@ class OfflineMapAndDualSystemTest {
     }
 
     @Test
+    fun testActualStorageFormattingHelper() {
+        assertEquals("0 MB", formatStorageBytes(0L))
+        assertEquals("0 MB", formatStorageBytes(-50L))
+        assertEquals("50.0 KB", formatStorageBytes(51200L))
+        assertEquals("15.5 MB", formatStorageBytes((15.5 * 1024 * 1024).toLong()))
+        assertEquals("1.25 GB", formatStorageBytes((1.25 * 1024 * 1024 * 1024).toLong()))
+    }
+
+    @Test
+    fun testOfflineMapRegionActualSizeAndCompletion() {
+        val incompleteRegion = OfflineMapRegion(
+            id = 101, name = "Tamil Nadu", description = "South India",
+            minLatitude = 8.08, minLongitude = 76.24, maxLatitude = 13.57, maxLongitude = 80.35,
+            sizeBytes = 256_901_120L,
+            actualSizeBytes = 0L,
+            completedResourceCount = 0L,
+            requiredResourceCount = 1200L,
+            isFullyComplete = false
+        )
+        assertEquals("0 MB", incompleteRegion.formattedActualSize)
+        assertFalse(incompleteRegion.isFullyComplete)
+
+        val completedRegion = incompleteRegion.copy(
+            status = OfflineRegionStatus.DOWNLOADED,
+            actualSizeBytes = 18_450_000L,
+            completedResourceCount = 1200L,
+            isFullyComplete = true
+        )
+        assertEquals("17.6 MB", completedRegion.formattedActualSize)
+        assertTrue(completedRegion.isFullyComplete)
+        assertTrue(completedRegion.isDownloaded)
+    }
+
+    @Test
+    fun testOfflineStorageDiagnosticsDataModel() {
+        val rDiag = RegionDiagnosticInfo(
+            regionName = "Tamil Nadu",
+            estimatedSizeBytes = 256_901_120L,
+            actualSizeBytes = 18_450_000L,
+            requiredResources = 1200L,
+            completedResources = 1200L,
+            status = "COMPLETE"
+        )
+        assertEquals("245.0 MB", rDiag.formattedEstimated)
+        assertEquals("17.6 MB", rDiag.formattedActual)
+        assertEquals("COMPLETE", rDiag.status)
+
+        val diag = OfflineStorageDiagnostics(
+            databasePath = "/data/user/0/com.travelhistory.app/files/mbgl-offline.db",
+            databaseSizeBytes = 19_000_000L,
+            totalRegionsCount = 5,
+            completedRegionsCount = 1,
+            regions = listOf(rDiag)
+        )
+        assertEquals("18.1 MB", diag.formattedDatabaseSize)
+        assertEquals(1, diag.completedRegionsCount)
+        assertEquals(5, diag.totalRegionsCount)
+    }
+
+    @Test
     fun testOfflineMapsUiStateStorageCalculation() {
         val r1 = OfflineMapRegion(
             id = 1, name = "R1", description = "",
             minLatitude = 0.0, minLongitude = 0.0, maxLatitude = 1.0, maxLongitude = 1.0,
             sizeBytes = 245 * 1024 * 1024L,
+            actualSizeBytes = 15 * 1024 * 1024L,
             status = OfflineRegionStatus.DOWNLOADED
         )
         val r2 = OfflineMapRegion(
             id = 2, name = "R2", description = "",
             minLatitude = 0.0, minLongitude = 0.0, maxLatitude = 1.0, maxLongitude = 1.0,
             sizeBytes = 160 * 1024 * 1024L,
+            actualSizeBytes = 12 * 1024 * 1024L,
             status = OfflineRegionStatus.DOWNLOADED
         )
 
         val state = OfflineMapsUiState(
             downloadedRegions = listOf(r1, r2),
-            totalStorageBytes = r1.sizeBytes + r2.sizeBytes
+            totalStorageBytes = r1.actualSizeBytes + r2.actualSizeBytes
         )
 
         assertTrue(state.hasDownloadedRegions)
-        assertEquals("405 MB", state.totalStorageFormatted)
+        assertEquals("27.0 MB", state.totalStorageFormatted)
+    }
+
+    @Test
+    fun testOfflineMapStyleAssetJsonValidOsmSource() {
+        val styleFile = if (File("src/main/assets/offline_map_style.json").exists()) {
+            File("src/main/assets/offline_map_style.json")
+        } else {
+            File("app/src/main/assets/offline_map_style.json")
+        }
+        assertTrue("offline_map_style.json must exist in assets", styleFile.exists())
+
+        val jsonContent = styleFile.readText()
+        val root = JSONObject(jsonContent)
+        assertEquals(8, root.getInt("version"))
+
+        val sources = root.getJSONObject("sources")
+        assertTrue("Must declare osm-tiles source", sources.has("osm-tiles"))
+
+        val osmSource = sources.getJSONObject("osm-tiles")
+        assertEquals("raster", osmSource.getString("type"))
+        assertTrue("Must have tile URL array", osmSource.getJSONArray("tiles").length() > 0)
+
+        val layers = root.getJSONArray("layers")
+        assertTrue("Must have at least 2 layers (background + raster)", layers.length() >= 2)
+
+        var hasOsmRasterLayer = false
+        for (i in 0 until layers.length()) {
+            val layer = layers.getJSONObject(i)
+            if (layer.optString("source") == "osm-tiles" && layer.optString("type") == "raster") {
+                hasOsmRasterLayer = true
+            }
+        }
+        assertTrue("Must contain a raster layer connected to osm-tiles source", hasOsmRasterLayer)
     }
 
     @Test

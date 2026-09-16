@@ -5,12 +5,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.travelhistory.app.data.map.offline.OfflineMapManager
 import com.travelhistory.app.data.map.offline.OfflineMapRegion
+import com.travelhistory.app.data.map.offline.OfflineStorageDiagnostics
+import com.travelhistory.app.data.map.offline.formatStorageBytes
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.Locale
 
 data class OfflineMapsUiState(
     val downloadedRegions: List<OfflineMapRegion> = emptyList(),
@@ -18,18 +19,11 @@ data class OfflineMapsUiState(
     val totalStorageBytes: Long = 0L,
     val isDownloading: Boolean = false,
     val downloadingRegionId: Long? = null,
-    val downloadProgress: Int = 0
+    val downloadProgress: Int = 0,
+    val diagnostics: OfflineStorageDiagnostics? = null
 ) {
     val totalStorageFormatted: String
-        get() {
-            if (totalStorageBytes <= 0L) return "0 MB"
-            val mb = totalStorageBytes.toDouble() / (1024.0 * 1024.0)
-            return if (mb >= 1000.0) {
-                String.format(Locale.US, "%.2f GB", mb / 1024.0)
-            } else {
-                String.format(Locale.US, "%.0f MB", mb)
-            }
-        }
+        get() = formatStorageBytes(totalStorageBytes)
 
     val hasDownloadedRegions: Boolean
         get() = downloadedRegions.isNotEmpty()
@@ -46,6 +40,7 @@ class OfflineMapsViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             offlineMapManager.downloadedRegions.collect { downloaded ->
                 _uiState.update { it.copy(downloadedRegions = downloaded) }
+                refreshDiagnostics()
             }
         }
 
@@ -58,8 +53,16 @@ class OfflineMapsViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             offlineMapManager.totalStorageBytes.collect { totalBytes ->
                 _uiState.update { it.copy(totalStorageBytes = totalBytes) }
+                refreshDiagnostics()
             }
         }
+
+        refreshDiagnostics()
+    }
+
+    fun refreshDiagnostics() {
+        val diag = offlineMapManager.getStorageDiagnostics()
+        _uiState.update { it.copy(diagnostics = diag) }
     }
 
     fun downloadRegion(region: OfflineMapRegion) {
@@ -84,11 +87,14 @@ class OfflineMapsViewModel(application: Application) : AndroidViewModel(applicat
                         downloadProgress = 0
                     )
                 }
+                refreshDiagnostics()
             }
         )
     }
 
     fun deleteRegion(region: OfflineMapRegion) {
-        offlineMapManager.deleteRegion(region.id)
+        offlineMapManager.deleteRegion(region.id) {
+            refreshDiagnostics()
+        }
     }
 }
